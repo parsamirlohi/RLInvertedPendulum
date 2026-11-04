@@ -1,5 +1,8 @@
 // Belt cart keyboard control - Arduino Nano side (smooth reversal version)
 // Commands: L = left, R = right, S = stop, V800 = set speed (steps/s)
+//           G<pos> = go to absolute position in steps (e.g. G1200, G-300)
+//                    keep sending it (>= every 300 ms) or the watchdog stops the cart
+//           Z      = set the current position as 0 (only when the cart is not moving)
 // Sends "P<position>" every 100 ms.
 
 #include <AccelStepper.h>
@@ -18,6 +21,7 @@ AccelStepper stepper(AccelStepper::DRIVER, STEP_PIN, DIR_PIN);
 enum Mode { STOPPED, LEFT, RIGHT };
 Mode mode = STOPPED;     // what the motor is doing now
 Mode wanted = STOPPED;   // what the Mac is asking for
+bool trackMode = false;  // true while following G<pos> position targets
 
 unsigned long lastCmdMs = 0;
 unsigned long lastReportMs = 0;
@@ -25,12 +29,30 @@ unsigned long stoppedAtMs = 0;
 char buf[16];
 byte bufLen = 0;
 
+// Leaving position-following mode: decelerate smoothly to a stop
+void leaveTrackMode() {
+  if (trackMode) {
+    stepper.stop();
+    trackMode = false;
+  }
+}
+
 void handleLine(const char *line) {
   lastCmdMs = millis();
   switch (line[0]) {
-    case 'L': wanted = LEFT; break;
-    case 'R': wanted = RIGHT; break;
-    case 'S': wanted = STOPPED; break;
+    case 'L': leaveTrackMode(); wanted = LEFT; break;
+    case 'R': leaveTrackMode(); wanted = RIGHT; break;
+    case 'S': leaveTrackMode(); wanted = STOPPED; break;
+    case 'G':
+      // Position target: AccelStepper plans the move (and any reversal) itself
+      trackMode = true;
+      wanted = STOPPED;
+      mode = STOPPED;
+      stepper.moveTo(atol(line + 1));
+      break;
+    case 'Z':
+      if (!stepper.isRunning()) stepper.setCurrentPosition(0);
+      break;
     case 'V': {
       float v = atof(line + 1);
       if (v < 50) v = 50;
@@ -42,6 +64,7 @@ void handleLine(const char *line) {
 }
 
 void updateMotion() {
+  if (trackMode) return;  // G<pos> targets are handled directly by stepper.run()
   if (wanted == mode) return;
 
   // Moving and asked to stop or reverse: decelerate to a full stop first
@@ -94,7 +117,10 @@ void loop() {
     }
   }
 
-  if (millis() - lastCmdMs > WATCHDOG_MS) wanted = STOPPED;
+  if (millis() - lastCmdMs > WATCHDOG_MS) {
+    wanted = STOPPED;
+    leaveTrackMode();
+  }
 
   updateMotion();
   stepper.run();
